@@ -114,6 +114,21 @@ class LinuxCrossArmTests(BaseLinuxCrossTests):
         self.run_tests()
         self.assertPathExists(stamp_file)
 
+    def test_exe_wrapper_def_in_test_setup(self):
+        '''
+        Run a cross compiled test with exe_wrapper defined in test_setup. Verify
+        the test wrapper actually runs with the cross binary as its only
+        argument.
+        '''
+        testdir = os.path.join(self.unit_test_dir, '129 exe_wrapper def in test setup')
+        stamp_file = os.path.join(self.builddir, 'remote_launch_has_run.stamp')
+        self.init(testdir)
+        self.build()
+        self.assertPathDoesNotExist(stamp_file)
+        with unittest.mock.patch.object(self, 'test_command', self.meson_command + ['test', '--setup=remote_launch']):
+            self.run_tests()
+        self.assertPathExists(stamp_file)
+
 
 def should_run_cross_mingw_tests():
     return shutil.which('x86_64-w64-mingw32-gcc') and not (is_windows() or is_cygwin())
