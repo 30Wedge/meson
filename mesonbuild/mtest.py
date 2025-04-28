@@ -1451,7 +1451,7 @@ class SingleTestRunner:
                  options: argparse.Namespace):
         self.test = test
         self.options = options
-        self.cmd = self._get_cmd()
+        self.cmd = self._get_test_cmd()
 
         if self.cmd and self.test.extra_paths:
             env['PATH'] = os.pathsep.join(self.test.extra_paths + ['']) + env['PATH']
@@ -1512,38 +1512,26 @@ class SingleTestRunner:
         return self.runobj.console_mode
 
     def _get_test_cmd(self) -> T.Optional[T.List[str]]:
+        wrap = TestHarness.get_wrapper(self.options)
         testentry = self.test.fname[0]
         if self.options.no_rebuild and self.test.cmd_is_built and not os.path.isfile(testentry):
             raise TestException(f'The test program {testentry!r} does not exist. Cannot run tests before building them.')
+        if self.test.cmd_is_exe and self.test.is_cross_built and self.test.needs_exe_wrapper and not wrap:
+            # Can not run test on cross compiled executable
+            # because there is no execute wrapper.
+            return None
+
         if testentry.endswith('.jar'):
-            return ['java', '-jar'] + self.test.fname
+            test_cmd = ['java', '-jar'] + self.test.fname
         elif not self.test.is_cross_built and run_with_mono(testentry):
-            return ['mono'] + self.test.fname
-        elif self.test.cmd_is_exe and self.test.is_cross_built and self.test.needs_exe_wrapper:
-            if self.test.exe_wrapper is None:
-                # Can not run test on cross compiled executable
-                # because there is no execute wrapper.
-                return None
-            elif self.test.cmd_is_exe:
-                # If the command is not built (ie, its a python script),
-                # then we don't check for the exe-wrapper
-                if not self.test.exe_wrapper.found():
-                    msg = ('The exe_wrapper defined in the cross file {!r} was not '
-                           'found. Please check the command and/or add it to PATH.')
-                    raise TestException(msg.format(self.test.exe_wrapper.name))
-                return self.test.exe_wrapper.get_command() + self.test.fname
+            test_cmd = ['mono'] + self.test.fname
         elif self.test.cmd_is_built and not self.test.cmd_is_exe and is_windows():
-            test_cmd = ExternalProgram._shebang_to_cmd(self.test.fname[0])
+            test_cmd = ExternalProgram._shebang_to_cmd(testentry)
             if test_cmd is not None:
                 test_cmd += self.test.fname[1:]
-            return test_cmd
-        return self.test.fname
-
-    def _get_cmd(self) -> T.Optional[T.List[str]]:
-        test_cmd = self._get_test_cmd()
-        if not test_cmd:
-            return None
-        return TestHarness.get_wrapper(self.options) + test_cmd
+        else:
+            test_cmd = self.test.fname
+        return wrap + test_cmd
 
     @property
     def is_parallel(self) -> bool:
@@ -1779,7 +1767,9 @@ class TestHarness:
         if options.wrapper is None:
             options.wrapper = current.exe_wrapper
         elif current.exe_wrapper:
-            sys.exit('Conflict: both test setup and command line specify an exe wrapper.')
+            mlog.error('Conflict: both test setup and command line specify an exe wrapper.')
+            sys.exit(1)
+
         return current.env.get_env(os.environ.copy())
 
     def get_test_runner(self, test: TestSerialisation, iteration: int) -> SingleTestRunner:
@@ -1789,11 +1779,18 @@ class TestHarness:
             env = self.merge_setup_options(options, test)
         else:
             env = os.environ.copy()
+        if options.wrapper is None:
+            options.wrapper = test.exe_wrapper
+        elif test.exe_wrapper:
+            mlog.error('Conflict: cross file specifies an exe wrapper in addition to test_setup or CLI args.')
+            sys.exit(1)
+        if options.wrapper is not None and not isinstance(options.wrapper, ExternalProgram):
+            options.wrapper = ExternalProgram.from_entry("cross file", options.wrapper)
         test_env = test.env.get_env(env)
         env.update(test_env)
         if (test.is_cross_built and test.needs_exe_wrapper and
-                test.exe_wrapper and test.exe_wrapper.found()):
-            env['MESON_EXE_WRAPPER'] = join_args(test.exe_wrapper.get_command())
+                options.wrapper and options.wrapper.found()):
+            env['MESON_EXE_WRAPPER'] = join_args(options.wrapper.get_command())
         env['MESON_TEST_ITERATION'] = str(iteration + 1)
         return SingleTestRunner(test, env, name, options)
 
@@ -2071,7 +2068,7 @@ class TestHarness:
             # Signal the end of arguments to gdb
             wrap += ['--args']
         elif options.wrapper:
-            wrap = options.wrapper
+            wrap = options.wrapper.get_command()
         else:
             wrap = []
         return wrap
@@ -2203,7 +2200,7 @@ class TestHarness:
             for l in self.loggers:
                 await l.finish(self)
 
-def list_tests(th: TestHarness) -> bool:
+def list_tests(th: TestHarness) -> bool:#
     tests = th.get_tests(errorfile=sys.stderr)
     for t in tests:
         print(th.get_pretty_suite(t))
